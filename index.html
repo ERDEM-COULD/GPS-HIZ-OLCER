@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <title>GPS Modlu Yolculuk</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; }
+    #map { flex: 1; }
+    .controls { background: #fff; padding: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); z-index: 1000; }
+    .stats, .settings { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+    .stats div, .settings div { flex: 1 1 45%; background: #f0f0f0; padding: 8px; border-radius: 6px; text-align: center; font-weight: bold; }
+    button { padding: 8px 14px; font-weight: bold; border: none; background: #2196F3; color: white; border-radius: 6px; cursor: pointer; margin: 5px; }
+    input[type="number"], select { padding: 6px; border-radius: 4px; }
+    #historyList { max-height: 200px; overflow-y: auto; background: #f9f9f9; padding: 10px; border-top: 1px solid #ddd; }
+    .history-item { border-bottom: 1px solid #ccc; padding: 6px 0; font-size: 14px; }
+  </style>
+</head>
+<body>
+
+<div class="controls">
+  <div class="settings">
+    <div>
+      <label>Mod: </label>
+      <select id="modeSelect" onchange="setModeSpeedLimit()">
+        <option value="walk">🚶 Yürüyüş</option>
+        <option value="bike">🚲 Bisiklet</option>
+        <option value="car" selected>🚗 Araba</option>
+        <option value="train">🚄 Tren</option>
+        <option value="plane">✈️ Uçak</option>
+        <option value="ship">🚢 Gemi</option>
+      </select>
+    </div>
+    <div>
+      <label>
+        <input type="checkbox" id="speedWarningToggle" onchange="toggleSpeedWarning()"> Hız Uyarısı
+      </label>
+      <input type="number" id="maxSpeedInput" placeholder="Max km/h" disabled />
+    </div>
+  </div>
+
+  <div>
+    <button onclick="startTracking()">🚀 Başlat</button>
+    <button onclick="stopTracking()">🛑 Bitir</button>
+    <button onclick="showHistory()">📁 Geçmişi Göster</button>
+    <button onclick="clearHistory()">🧹 Temizle</button>
+  </div>
+
+  <div class="stats">
+    <div>Mod: <span id="currentMode">🚗 Araba</span></div>
+    <div>Anlık: <span id="currentSpeed">0</span> km/h</div>
+    <div>Ortalama: <span id="avgSpeed">0</span> km/h</div>
+    <div>Maksimum: <span id="maxSpeed">0</span> km/h</div>
+    <div>Mesafe: <span id="distance">0</span> km</div>
+    <div>Süre: <span id="duration">0</span></div>
+  </div>
+</div>
+
+<div id="map"></div>
+<div id="historyList"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+  const modeSettings = {
+    walk:   { emoji: "🚶", max: 7 },
+    bike:   { emoji: "🚲", max: 25 },
+    car:    { emoji: "🚗", max: 120 },
+    train:  { emoji: "🚄", max: 200 },
+    plane:  { emoji: "✈️", max: 900 },
+    ship:   { emoji: "🚢", max: 60 }
+  };
+
+  let map, pathLine, marker, positions = [], watchId, startTime;
+  let totalDistance = 0, maxSpeedRecorded = 0, currentMode = "car";
+  let isTracking = false;  // Yeni flag, yolculuk durumu kontrolü için
+
+  const beep = new AudioContext();
+  function playBeep() {
+    const o = beep.createOscillator(), g = beep.createGain();
+    o.type = "square"; o.frequency.setValueAtTime(700, beep.currentTime);
+    o.connect(g); g.connect(beep.destination); o.start(); o.stop(beep.currentTime + 0.2);
+  }
+
+  function speak(text) {
+    const msg = new SpeechSynthesisUtterance(text); msg.lang = "tr-TR"; speechSynthesis.speak(msg);
+  }
+
+  function toggleSpeedWarning() {
+    document.getElementById("maxSpeedInput").disabled = !document.getElementById("speedWarningToggle").checked;
+  }
+
+  function setModeSpeedLimit() {
+    const mode = document.getElementById("modeSelect").value;
+    currentMode = mode;
+    document.getElementById("currentMode").textContent = modeSettings[mode].emoji + " " + mode.charAt(0).toUpperCase() + mode.slice(1);
+    document.getElementById("maxSpeedInput").value = modeSettings[mode].max;
+  }
+
+  function startTracking() {
+    if (isTracking) {
+      alert("Yolculuk zaten başladı!");  // Açık uyarısı
+      return;
+    }
+    setModeSpeedLimit();
+    if (!map) {
+      map = L.map('map').setView([0, 0], 13);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+      pathLine = L.polyline([], { color: 'blue' }).addTo(map);
+      marker = L.circleMarker([0, 0], { radius: 8, color: 'blue', fillColor: '#30f', fillOpacity: 0.9 }).addTo(map);
+    }
+
+    positions = []; totalDistance = 0; maxSpeedRecorded = 0;
+    startTime = Date.now();
+    watchId = navigator.geolocation.watchPosition(success, error, {
+      enableHighAccuracy: true, maximumAge: 0
+    });
+    isTracking = true;  // Yolculuk başlatıldı
+  }
+
+  function stopTracking() {
+    if (!isTracking) {
+      alert("Yolculuk henüz başlamadı!");  // Duruk uyarısı
+      return;
+    }
+    navigator.geolocation.clearWatch(watchId);
+    const endTime = Date.now(), durationSec = (endTime - startTime) / 1000;
+    const avgSpeed = (totalDistance / (durationSec / 3600));
+    const record = {
+      startTime: new Date().toLocaleString("tr-TR"),
+      duration: formatDuration(durationSec),
+      distance: totalDistance.toFixed(2),
+      avgSpeed: avgSpeed.toFixed(1),
+      maxSpeed: maxSpeedRecorded.toFixed(1),
+      mode: currentMode
+    };
+    const history = JSON.parse(localStorage.getItem("gpsHistory") || "[]");
+    history.push(record);
+    localStorage.setItem("gpsHistory", JSON.stringify(history));
+    alert("Yolculuk kaydedildi!");
+    isTracking = false;  // Yolculuk bitti
+  }
+
+  function success(pos) {
+    const { latitude, longitude, speed } = pos.coords;
+    const now = [latitude, longitude], nowTime = Date.now();
+    if (positions.length > 0) {
+      const last = positions[positions.length - 1];
+      const dist = getDistance(last, now);
+      totalDistance += dist;
+      const deltaTime = (nowTime - last.time) / 1000;
+      const instantSpeed = (dist * 1000) / deltaTime;
+      updateStats(instantSpeed, nowTime);
+    }
+    positions.push({ lat: latitude, lng: longitude, time: nowTime });
+    pathLine.addLatLng(now); marker.setLatLng(now); map.setView(now, 17);
+
+    const speedKmh = (speed || 0) * 3.6;
+    document.getElementById("currentSpeed").textContent = speedKmh.toFixed(1);
+
+    const warnOn = document.getElementById("speedWarningToggle").checked;
+    const maxAllowed = parseFloat(document.getElementById("maxSpeedInput").value);
+    if (warnOn && !isNaN(maxAllowed) && speedKmh > maxAllowed) {
+      playBeep(); speak("Yüksek hız!");
+    }
+  }
+
+  function updateStats(currentSpeed, nowTime) {
+    const kmh = currentSpeed * 3.6;
+    maxSpeedRecorded = Math.max(maxSpeedRecorded, kmh);
+    const totalTime = (nowTime - startTime) / 1000;
+    const avgSpeed = totalDistance / (totalTime / 3600);
+    document.getElementById("avgSpeed").textContent = avgSpeed.toFixed(1);
+    document.getElementById("maxSpeed").textContent = maxSpeedRecorded.toFixed(1);
+    document.getElementById("distance").textContent = totalDistance.toFixed(2);
+    document.getElementById("duration").textContent = formatDuration(totalTime);
+  }
+
+  function formatDuration(sec) {
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+    return `${h}h ${m}m ${s}s`;
+  }
+
+  function getDistance(p1, p2) {
+    const R = 6371, dLat = toRad(p2[0] - p1.lat), dLon = toRad(p2[1] - p1.lng);
+    const a = Math.sin(dLat/2)**2 + Math.cos(toRad(p1.lat)) * Math.cos(toRad(p2[0])) * Math.sin(dLon/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  function toRad(deg) { return deg * Math.PI / 180; }
+
+  function showHistory() {
+    const list = JSON.parse(localStorage.getItem("gpsHistory") || "[]");
+    const div = document.getElementById("historyList");
+    if (!list.length) return div.innerHTML = "<b>Hiç yolculuk kaydı yok.</b>";
+    div.innerHTML = "<h4>📁 Yolculuk Geçmişi</h4>" + list.map(item => `
+      <div class="history-item">
+        <b>${modeSettings[item.mode]?.emoji || ''} ${item.startTime}</b><br>
+        Mod: ${item.mode} | Süre: ${item.duration}<br>
+        Mesafe: ${item.distance} km | Ort: ${item.avgSpeed} km/h | Max: ${item.maxSpeed} km/h
+      </div>
+    `).join("");
+  }
+
+  function clearHistory() {
+    if (confirm("Tüm geçmiş silinsin mi?")) {
+      localStorage.removeItem("gpsHistory");
+      document.getElementById("historyList").innerHTML = "";
+    }
+  }
+
+  function error(err) {
+    alert("Konum alınamadı: " + err.message);
+  }
+</script>
+
+</body>
+</html>
